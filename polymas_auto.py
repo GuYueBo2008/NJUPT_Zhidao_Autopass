@@ -36,7 +36,8 @@ Polymas（智慧树）智能体课程 全自动看课脚本（纯 HTTP，无需�
     --chunk 0 表示不分片（一次上报整段，最容易被识别，不建议）。
     --realtime 可强制按真实时间发送：等到每片真的"看完"才上报，于是"请求到达时间"与
     上报的观看时间基本重合（整批耗时≈视频总时长；单线程=按顺序真实播放，多线程=多视频同时真实播放）。
-    该开关既可用命令行 --realtime 指定，也可在选课界面按 r 键随时切换。
+    该开关既可用命令行 --realtime 指定，也可在选课界面输入 r / safe 随时切换
+    （单独输入或与序号连着写都可以，如 r、1r、1,r、safe；输入法打成全角也会自动转半角）。
 看完不会自动退出：可继续选择其它课程，输入 q 才结束；结束时会打印错误汇总与日志路径。
 同意免责声明后等 2 秒自动进入程序；首页→登录→选课→看课→返回选课 等功能切换会自动清屏。
 多线程并发上报（--threads，默认 8、最大 32）：每个视频一个线程同步推送，视频内部的分片仍按顺序串行发送。
@@ -94,7 +95,7 @@ def _harden_console_encoding():
 # ============================== 终端配色 ==============================
 
 APP_NAME = "Polymas 自动看课助手"
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.1.1"
 APP_AUTHOR = "古月波"
 APP_REPO = "github.com/GuYueBo2008/NJUPT_Zhidao_Autopass"
 APP_LICENSE = "MIT License"
@@ -590,10 +591,24 @@ def print_courses(courses):
     print(clr(LINE, C_BLUE))
 
 
-def choose_courses(courses, opts=None):
-    """交互式选择要看的课程。支持多选(1,3)、0=全部、r=切换上报节奏、q=退出。
+def _toggle_realtime(opts):
+    """切换上报节奏（压缩发送 <-> 真实时间间隔），并打印切换结果。返回切换后的值。"""
+    opts["realtime"] = not opts.get("realtime")
+    if opts["realtime"]:
+        print("  " + clr("已切换为「真实时间间隔」", C_GREEN, BOLD)
+              + clr("：请求会按实际观看时长逐条发出，整批耗时 ≈ 全部视频总时长，", C_YELLOW))
+        print("  " + _hint("可能长达数小时，请确保电脑不会休眠或断网；"
+                           "再输入一次 r / safe 可改回压缩发送。"))
+    else:
+        print("  " + clr("已切换为「压缩发送」", C_YELLOW, BOLD)
+              + clr("：按分片快速上报，请求到达时间会早于上报的观看时间。", C_GRAY))
+    return opts["realtime"]
 
-    opts 为可变的设置字典（含 realtime / threads），界面里按 r 键就地切换，
+
+def choose_courses(courses, opts=None):
+    """交互式选择要看的课程。支持多选(1,3)、0=全部、r/safe=切换上报节奏、q=退出。
+
+    opts 为可变的设置字典（含 realtime / threads），界面里输入 r / safe 就地切换，
     调用方读同一个字典即可拿到用户的选择。
     """
     if not courses:
@@ -623,36 +638,34 @@ def choose_courses(courses, opts=None):
             print("  " + clr("r)", C_YELLOW, BOLD) + " " + clr("上报节奏：", C_GRAY)
                   + clr("压缩发送", C_YELLOW, BOLD)
                   + clr("  请求到达时间早于上报的观看时间", C_GRAY))
-            print("       " + clr("很快；想更贴近真实观看可按 r 切换为真实时间间隔", C_GRAY))
+            print("       " + clr("很快；想更贴近真实观看可输入 r / safe 切换", C_GRAY))
         print(clr(LINE, C_BLUE))
         print("  " + clr("输入示例：  1  或  1,3  选课程      0  全部      "
-                         "r  切换上报节奏      q  退出", C_GRAY))
+                         "r / safe  切换上报节奏      q  退出", C_GRAY))
         try:
-            raw = input(clr("请输入序号 > ", C_CYAN, BOLD)).strip()
+            raw = input(clr("请输入序号 > ", C_CYAN, BOLD))
         except (EOFError, KeyboardInterrupt):
             print()
             return []
-        low = raw.lower()
-        if low in ("q", "quit", "exit"):
+        # 输入法常把 r 打成全角 ｒ、把逗号打成 ，：统一转半角小写后再解析，
+        # 否则"序号里混入 r"会被当成非法序号
+        raw = "".join(_to_ascii_char(ch) for ch in raw).strip().lower()
+        if raw in ("q", "quit", "exit"):
             return []
-        if low == "r":
-            opts["realtime"] = not opts.get("realtime")
-            if opts["realtime"]:
-                print("  " + clr("已切换为「真实时间间隔」", C_GREEN, BOLD)
-                      + clr("：请求会按实际观看时长逐条发出，整批耗时 ≈ 全部视频总时长，",
-                            C_YELLOW))
-                print("  " + _hint("可能长达数小时，请确保电脑不会休眠或断网；"
-                                   "想改回来再按一次 r。"))
-            else:
-                print("  " + clr("已切换为「压缩发送」", C_YELLOW, BOLD)
-                      + clr("：按分片快速上报，请求到达时间会早于上报的观看时间。", C_GRAY))
-            continue
-        if raw in ("0", "all", "*"):
-            return list(courses)
         parts = [p for p in re.split(r"[,\s]+", raw) if p]
+        # r / safe 出现在输入里（单独写、或与序号连着写如 1r）就切换上报节奏；
+        # 去掉这些字母后，剩下的数字照常按序号处理
+        if any(w in ("r", "safe") for w in re.findall(r"[a-z]+", raw)):
+            _toggle_realtime(opts)
+            raw = re.sub(r"safe|r", " ", raw)
+            parts = [p for p in re.split(r"[,\s]+", raw) if p]
+            if not parts:
+                continue
         if not parts:
             print("  " + clr("! 输入为空，请重新输入", C_YELLOW))
             continue
+        if len(parts) == 1 and parts[0] in ("0", "all", "*"):
+            return list(courses)
         bad = [p for p in parts if not p.isdigit() or not (1 <= int(p) <= len(courses))]
         if bad:
             print("  " + clr("! 无效序号：%s，请重新输入" % ", ".join(bad), C_YELLOW))
@@ -1185,7 +1198,7 @@ def main():
 
     # 一次性模式（--list / --course / --all）跑完就结束；否则交互循环，看完不退出
     one_shot = bool(args.list or args.course or args.all)
-    # 上报设置：初值来自命令行，选课界面里可按 r 键切换（同一个字典就地生效）
+    # 上报设置：初值来自命令行，选课界面里可输入 r / safe 切换（同一个字典就地生效）
     opts = {"realtime": bool(args.realtime),
             "threads": max(1, min(THREADS_MAX, int(args.threads or THREADS_DEFAULT)))}
 
@@ -1240,7 +1253,7 @@ def main():
               + (clr("真实时间间隔", C_GREEN, BOLD) if opts["realtime"]
                  else clr("压缩发送", C_YELLOW, BOLD))
               + clr("    并发线程：%d" % opts["threads"], C_GRAY)
-              + clr("    （可在选课界面按 r 切换节奏）", C_GRAY))
+              + clr("    （可在选课界面输入 r / safe 切换节奏）", C_GRAY))
         t0 = time.time()
         cv = cd = 0
         for c in targets:
