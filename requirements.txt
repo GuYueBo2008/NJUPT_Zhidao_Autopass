@@ -1,0 +1,5 @@
+requests>=2.28.0
+cryptography>=41.0.0
+
+# 打包 exe 时额外需要（可选）：
+# pyinstaller>=6.0

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 构建产物（exe 请作为 Release 附件上传，不入库）
+build/
+dist/
+*.spec
+*.exe
+*.dmg
+*.AppImage
+
+# 程序运行产物 / 日志
+*.log
+
+# 环境变量与本地配置
+.env
+.env.*
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 其他
+.screenshots/
