@@ -34,6 +34,9 @@ Polymas（智慧树）智能体课程 全自动看课脚本（纯 HTTP，无需�
     多个视频串成一条连续时间线，最后一片结束时间贴近真实当前时间；
     分片长度与间隔加入随机抖动，避免固定节奏的机器特征。
     --chunk 0 表示不分片（一次上报整段，最容易被识别，不建议）。
+    --realtime 可强制按真实时间发送：等到每片真的"看完"才上报，于是"请求到达时间"与
+    上报的观看时间基本重合（整批耗时≈视频总时长；单线程=按顺序真实播放，多线程=多视频同时真实播放）。
+    该开关既可用命令行 --realtime 指定，也可在选课界面按 r 键随时切换。
 看完不会自动退出：可继续选择其它课程，输入 q 才结束；结束时会打印错误汇总与日志路径。
 同意免责声明后等 2 秒自动进入程序；首页→登录→选课→看课→返回选课 等功能切换会自动清屏。
 多线程并发上报（--threads，默认 8、最大 32）：每个视频一个线程同步推送，视频内部的分片仍按顺序串行发送。
@@ -91,7 +94,7 @@ def _harden_console_encoding():
 # ============================== 终端配色 ==============================
 
 APP_NAME = "Polymas 自动看课助手"
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.1"
 APP_AUTHOR = "古月波"
 APP_REPO = "github.com/GuYueBo2008/NJUPT_Zhidao_Autopass"
 APP_LICENSE = "MIT License"
@@ -587,10 +590,17 @@ def print_courses(courses):
     print(clr(LINE, C_BLUE))
 
 
-def choose_courses(courses):
-    """交互式选择要看的课程。支持多选(1,3)、0=全部、q=退出。"""
+def choose_courses(courses, opts=None):
+    """交互式选择要看的课程。支持多选(1,3)、0=全部、r=切换上报节奏、q=退出。
+
+    opts 为可变的设置字典（含 realtime / threads），界面里按 r 键就地切换，
+    调用方读同一个字典即可拿到用户的选择。
+    """
     if not courses:
         return []
+    if opts is None:
+        opts = {}
+    opts.setdefault("realtime", False)
     while True:
         print("\n" + clr(LINE, C_BLUE))
         print("  " + _title("请选择要看的课程"))
@@ -603,14 +613,40 @@ def choose_courses(courses):
                   + "  " + clr("学期 %s" % terms, C_GRAY))
         print("  " + clr("%2d)" % 0, C_GREEN, BOLD) + " " + clr("全部课程", C_GREEN))
         print(clr(LINE, C_BLUE))
-        print("  " + clr("输入示例：  1  或  1,3  选课程      0  全部      q  退出", C_GRAY))
+        # 上报设置（按 r 切换，可随时改）
+        if opts.get("realtime"):
+            print("  " + clr("r)", C_GREEN, BOLD) + " " + clr("上报节奏：", C_GRAY)
+                  + clr("真实时间间隔", C_GREEN, BOLD)
+                  + clr("  请求到达时间 ≈ 上报的观看时间", C_GRAY))
+            print("       " + clr("整批耗时 ≈ 全部视频总时长，很慢；选课后立即生效", C_YELLOW))
+        else:
+            print("  " + clr("r)", C_YELLOW, BOLD) + " " + clr("上报节奏：", C_GRAY)
+                  + clr("压缩发送", C_YELLOW, BOLD)
+                  + clr("  请求到达时间早于上报的观看时间", C_GRAY))
+            print("       " + clr("很快；想更贴近真实观看可按 r 切换为真实时间间隔", C_GRAY))
+        print(clr(LINE, C_BLUE))
+        print("  " + clr("输入示例：  1  或  1,3  选课程      0  全部      "
+                         "r  切换上报节奏      q  退出", C_GRAY))
         try:
             raw = input(clr("请输入序号 > ", C_CYAN, BOLD)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return []
-        if raw.lower() in ("q", "quit", "exit"):
+        low = raw.lower()
+        if low in ("q", "quit", "exit"):
             return []
+        if low == "r":
+            opts["realtime"] = not opts.get("realtime")
+            if opts["realtime"]:
+                print("  " + clr("已切换为「真实时间间隔」", C_GREEN, BOLD)
+                      + clr("：请求会按实际观看时长逐条发出，整批耗时 ≈ 全部视频总时长，",
+                            C_YELLOW))
+                print("  " + _hint("可能长达数小时，请确保电脑不会休眠或断网；"
+                                   "想改回来再按一次 r。"))
+            else:
+                print("  " + clr("已切换为「压缩发送」", C_YELLOW, BOLD)
+                      + clr("：按分片快速上报，请求到达时间会早于上报的观看时间。", C_GRAY))
+            continue
         if raw in ("0", "all", "*"):
             return list(courses)
         parts = [p for p in re.split(r"[,\s]+", raw) if p]
@@ -679,7 +715,7 @@ def _chunk_plan(duration, step):
 
 
 def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
-                 tty=None, chunk=CHUNK_SEC, threads=THREADS_DEFAULT):
+                 tty=None, chunk=CHUNK_SEC, threads=THREADS_DEFAULT, realtime=False):
     """看一门课：拿到资源树，按分片逐步上报到 100%，过程中显示进度。返回统计。"""
     course_id = course.get("courseId")
     name = course.get("courseName")
@@ -704,8 +740,16 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
     workers = max(1, min(THREADS_MAX, int(threads or 1), len(todo) or 1))
     print("  " + clr("并发线程：", C_GRAY) + clr(workers, C_CYAN, BOLD)
           + clr("（每个视频一个线程，各视频同步上报）", C_GRAY))
-    write_log("课程 %s(%s) 学期=%s：共 %d 个视频，待看 %d 个，线程数 %d"
-              % (name, course_id, term, len(items), len(todo), workers))
+    # 上报节奏：--realtime 时按真实时间等待，请求到达时间与上报时间一致
+    if realtime:
+        print("  " + clr("上报节奏：", C_GRAY) + clr("按真实时间间隔发送", C_GREEN, BOLD)
+              + clr("（整批耗时 ≈ 总时长，最贴近真实观看，但很慢）", C_GRAY))
+    else:
+        print("  " + clr("上报节奏：", C_GRAY) + clr("分片压缩发送", C_YELLOW, BOLD)
+              + clr("（很快，但请求到达时间早于上报的观看时间）", C_GRAY))
+    write_log("课程 %s(%s) 学期=%s：共 %d 个视频，待看 %d 个，线程数 %d，节奏=%s"
+              % (name, course_id, term, len(items), len(todo), workers,
+                 "真实时间" if realtime else "压缩"))
 
     if dry_run:
         for i, it in enumerate(todo, 1):
@@ -716,16 +760,20 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
         return {"total": len(items), "done": sum(1 for it in items if it["isFinished"])}
 
     # —— 观看时间线 ——
-    # 把整批视频串成一条连续时间线，最后一片的结束时间贴近真实当前时间，
+    # 默认（压缩）模式：把整批视频串成一条连续时间线，最后一片的结束时间贴近真实当前时间，
     # 这样每个视频的起止时间不重叠、不与真实时间脱节，看起来就是一路看下来的。
     # 多线程并发只改变"请求什么时候发出"，时间线本身仍按顺序排布，保持自洽。
-    total_secs = sum(max(1, int(it["duration"] or 0)) for it in todo) or 1
-    timeline_start = time.time() - total_secs - random.uniform(0.5, 3.0)
+    # --realtime 模式：不再预排时间线，每个视频以自己真实开始的时刻为锚点，
+    # 并按真实时长等待后再发下一片，于是"请求到达时间"与"上报的观看时间"基本重合。
+    timeline_start = None
     v_starts = {}
-    cursor = 0.0
-    for it in todo:
-        v_starts[it["nodeId"]] = cursor
-        cursor += max(1, int(it["duration"] or 0))
+    if not realtime:
+        total_secs = sum(max(1, int(it["duration"] or 0)) for it in todo) or 1
+        timeline_start = time.time() - total_secs - random.uniform(0.5, 3.0)
+        cursor = 0.0
+        for it in todo:
+            v_starts[it["nodeId"]] = cursor
+            cursor += max(1, int(it["duration"] or 0))
 
     fail_count = [0]
     done_count = [0]
@@ -733,17 +781,21 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
     def watch_one(it):
         """单个视频：分片依次上报（同一视频内部仍严格顺序推进），返回 (plan, rate)。"""
         plan = _chunk_plan(it["duration"], chunk)
-        v_start = v_starts[it["nodeId"]]
+        # 锚点：真实模式取本线程开始处理的时刻；压缩模式取预排时间线上的位置
+        anchor = time.time() if realtime else timeline_start + v_starts[it["nodeId"]]
         rate = None
         for idx, (cs, ce) in enumerate(plan):
-            sdt = time.strftime("%Y-%m-%d %H:%M:%S",
-                                time.localtime(timeline_start + v_start + cs))
-            edt = time.strftime("%Y-%m-%d %H:%M:%S",
-                                time.localtime(timeline_start + v_start + ce))
+            if realtime:
+                # 等到这一片真的"看完"再上报，使请求到达时间 ≈ 上报的结束时间
+                left = (anchor + ce) - time.time()
+                if left > 0:
+                    time.sleep(left)
+            sdt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(anchor + cs))
+            edt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(anchor + ce))
             rate = poly.report(course_id, term, it["nodeId"], cs, ce, ce, sdt, edt)
             write_log("分片上报 %s  %s~%ss  %s -> %s  completeRate=%s"
                       % (it["title"], cs, ce, sdt, edt, rate))
-            if idx < len(plan) - 1:
+            if not realtime and idx < len(plan) - 1:
                 time.sleep(random.uniform(*CHUNK_DELAY))
         return plan, rate
 
@@ -1057,6 +1109,9 @@ def main():
     ap.add_argument("--threads", type=int, default=THREADS_DEFAULT,
                     help="并发线程数：每个视频一个线程，默认 %d，最大 %d（超出按 %d 处理）"
                          % (THREADS_DEFAULT, THREADS_MAX, THREADS_MAX))
+    ap.add_argument("--realtime", action="store_true",
+                    help="按真实时间间隔发送请求：等到该片真的\"看完\"才上报，"
+                         "整批耗时≈视频总时长（单线程时按顺序真实播放，多线程时多视频同时真实播放）")
     ap.add_argument("--user", default=os.environ.get("ZHS_USER"), help="账号/学号（不填则启动时询问）")
     ap.add_argument("--pass", dest="password", default=os.environ.get("ZHS_PASS"),
                     help="密码（不填则启动时询问）")
@@ -1086,6 +1141,9 @@ def main():
     print("   " + clr("1.", C_MAGENTA, BOLD) + " 按提示输入账号（学号）和密码，密码显示为 " + clr("*", C_YELLOW))
     print("   " + clr("2.", C_MAGENTA, BOLD) + " 在课程列表里输入序号选择要看的课（可多选，如 " + clr("1,3", C_CYAN) + "）")
     print("   " + clr("3.", C_MAGENTA, BOLD) + " 程序自动把视频标记为已看完，随时输入 " + clr("q", C_CYAN) + " 退出")
+    print("  " + clr("可选：", C_GRAY) + "课程列表界面按 " + clr("r", C_CYAN, BOLD)
+          + " 可在" + clr("压缩发送", C_YELLOW) + " / " + clr("真实时间间隔", C_GREEN)
+          + " 之间切换上报节奏")
     print("  " + _hint("本程序不会保存你的账号密码，也不会联网上传任何个人信息。"))
 
     # 免责声明确认（按下任意键表示同意，不同意则退出）
@@ -1127,6 +1185,9 @@ def main():
 
     # 一次性模式（--list / --course / --all）跑完就结束；否则交互循环，看完不退出
     one_shot = bool(args.list or args.course or args.all)
+    # 上报设置：初值来自命令行，选课界面里可按 r 键切换（同一个字典就地生效）
+    opts = {"realtime": bool(args.realtime),
+            "threads": max(1, min(THREADS_MAX, int(args.threads or THREADS_DEFAULT)))}
 
     # 2) 主循环
     while True:
@@ -1156,7 +1217,7 @@ def main():
                 print_courses(courses)
                 targets = [pick_course(courses, args.course)]
             elif args.select or sys.stdin.isatty():
-                targets = choose_courses(courses)
+                targets = choose_courses(courses, opts)
             else:
                 print_courses(courses)
                 record_error("选择课程", RuntimeError(
@@ -1175,13 +1236,19 @@ def main():
         # 看课
         clear_screen()      # 选课界面 → 看课界面
         print("\n  " + _step(3, 4, "开始看课：共 %d 门课程" % len(targets)))
+        print("  " + clr("上报节奏：", C_GRAY)
+              + (clr("真实时间间隔", C_GREEN, BOLD) if opts["realtime"]
+                 else clr("压缩发送", C_YELLOW, BOLD))
+              + clr("    并发线程：%d" % opts["threads"], C_GRAY)
+              + clr("    （可在选课界面按 r 切换节奏）", C_GRAY))
         t0 = time.time()
         cv = cd = 0
         for c in targets:
             try:
                 st = brush_course(poly, c, term_arg=args.term,
                                   force=args.force, dry_run=args.dry_run,
-                                  chunk=args.chunk, threads=args.threads)
+                                  chunk=args.chunk, threads=opts["threads"],
+                                  realtime=opts["realtime"])
                 cv += st["total"]
                 cd += st["done"]
             except Exception as e:
