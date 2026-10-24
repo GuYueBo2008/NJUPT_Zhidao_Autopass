@@ -95,7 +95,7 @@ def _harden_console_encoding():
 # ============================== 终端配色 ==============================
 
 APP_NAME = "Polymas 自动看课助手"
-APP_VERSION = "v1.1.1"
+APP_VERSION = "v1.1.2"
 APP_AUTHOR = "古月波"
 APP_REPO = "github.com/GuYueBo2008/NJUPT_Zhidao_Autopass"
 APP_LICENSE = "MIT License"
@@ -485,16 +485,37 @@ class Polymas:
 
     def library_folder(self, course_id, term):
         data = self._get(P_LIBRARY, params={"courseId": course_id, "term": term})
+        write_log("资源库接口返回 type=%s data=%r" % (type(data).__name__, data))
         if not data:
             raise RuntimeError("未取到资源库 libraryFolderId")
-        return data
+        # 正常情况 data 就是文件夹 ID 字符串；个别课程（专题课等）会包一层对象/数组，
+        # 这里统一取出真正的 folderId，避免把整个对象当成 ID 发出去
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            for k in ("libraryFolderId", "folderId", "id", "libraryId"):
+                if data.get(k):
+                    return data[k]
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                for k in ("libraryFolderId", "folderId", "id", "libraryId"):
+                    if first.get(k):
+                        return first[k]
+            elif isinstance(first, str):
+                return first
+        return str(data)
 
-    def tree(self, course_id, term, library_folder_id):
-        data = self._post(P_TREE, {
+    def tree(self, course_id, term, library_folder_id, class_id=None):
+        body = {
             "libraryFolderId": library_folder_id,
             "courseId": course_id,
             "term": term,
-        })
+        }
+        if class_id:
+            body["classId"] = class_id
+        write_log("queryTree 请求体: %s" % json.dumps(body, ensure_ascii=False))
+        data = self._post(P_TREE, body)
         items = []
 
         def walk(nodes):
@@ -575,6 +596,23 @@ def get_term(course, term_arg=None):
     if not terms:
         raise RuntimeError("课程没有可用学期")
     return int(terms[0])
+
+
+def get_class_id(course):
+    """取课程的班级 ID（queryTree 需要它，否则接口会报"参数不能为空"）。
+
+    queryStudentCourse 返回的课程里，班级 ID 可能在顶层 classId，
+    也可能在 studentClasses[] 里（一个课程可能属于多个班）。
+    """
+    cid = course.get("classId")
+    if cid:
+        return cid
+    for clazz in (course.get("studentClasses") or []):
+        if isinstance(clazz, dict) and clazz.get("classId"):
+            return clazz["classId"]
+        if isinstance(clazz, str) and clazz:
+            return clazz
+    return None
 
 
 def print_courses(courses):
@@ -733,6 +771,7 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
     course_id = course.get("courseId")
     name = course.get("courseName")
     term = get_term(course, term_arg)
+    class_id = get_class_id(course)
     if tty is None:
         tty = sys.stdout.isatty()
     print("\n" + clr("═" * 58, C_MAGENTA))
@@ -740,8 +779,9 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
           + "    " + clr("学期 %s" % term, C_GRAY))
     print(clr("═" * 58, C_MAGENTA))
 
+    write_log("课程字段 courseId=%r classId=%r term=%r" % (course_id, class_id, term))
     folder_id = poly.library_folder(course_id, term)
-    items = poly.tree(course_id, term, folder_id)
+    items = poly.tree(course_id, term, folder_id, class_id)
     if not items:
         print("  " + clr("该课程下暂无可看视频，已跳过。", C_YELLOW))
         return {"total": 0, "done": 0}
@@ -850,7 +890,7 @@ def brush_course(poly, course, term_arg=None, force=False, dry_run=False,
         sys.stdout.flush()
 
     # 复核
-    final = poly.tree(course_id, term, folder_id)
+    final = poly.tree(course_id, term, folder_id, class_id)
     done = sum(1 for it in final if it["isFinished"])
     print("\n  " + _step(4, 4, "复核结果"))
     print("  " + clr("✓ [完成]", C_GREEN, BOLD) + " 复核：%s/%s 个视频已完成"

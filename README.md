@@ -122,7 +122,9 @@ pyinstaller --onefile --name polymas_auto polymas_auto.py
    南邮登录参数使用 AES-CBC 加密，密钥由前端固定值派生。
 
 2. **课程与资源**
-   通过课程列表接口获取课程与学期，再通过资源树接口 `student-course/student/resource/queryTree` 遍历视频节点。
+   通过课程列表接口获取课程、学期与班级 ID（`classId` / `studentClasses[].classId`），再调用资源树接口
+   `student-course/study/student/resource/queryTree` 遍历视频节点。该接口要求 `libraryFolderId` 与 `classId` 同时提供，
+   缺任一字段服务端会返回 `code=200041 参数不能为空`（日志会打印实际请求体便于排查）。
 
 3. **上报（分片观看）**
    不会一次性把进度拉满，而是按 `--chunk`（默认 60 秒）把视频切成若干分片，逐片调用 `student-course/study/student/record/report` 上报：
@@ -166,6 +168,7 @@ pyinstaller --onefile --name polymas_auto polymas_auto.py
 | 登录偶发失败 | 程序内置自动重试；仍失败请查看日志定位 |
 | 中文显示乱码 | 程序已切换 UTF-8 代码页，如异常请使用新版终端 |
 | 课程未完成 | 加 `--force` 重报，或查看日志中的上报错误 |
+| 报错 `200041 参数不能为空` | 查看日志中的 `queryTree 请求体` 与 `课程字段` 行，确认 `classId` / `libraryFolderId` 是否为空 |
 
 ---
 
